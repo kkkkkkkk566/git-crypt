@@ -163,12 +163,15 @@ static void configure_git_filters (const char* key_name)
 		           escaped_git_crypt_path + " smudge --key-name=" + key_name);
 		git_config(std::string("filter.git-crypt-") + key_name + ".clean",
 		           escaped_git_crypt_path + " clean --key-name=" + key_name);
+		git_config(std::string("filter.git-crypt-") + key_name + ".process",
+		           escaped_git_crypt_path + " process --key-name=" + key_name);
 		git_config(std::string("filter.git-crypt-") + key_name + ".required", "true");
 		git_config(std::string("diff.git-crypt-") + key_name + ".textconv",
 		           escaped_git_crypt_path + " diff --key-name=" + key_name);
 	} else {
 		git_config("filter.git-crypt.smudge", escaped_git_crypt_path + " smudge");
 		git_config("filter.git-crypt.clean", escaped_git_crypt_path + " clean");
+		git_config("filter.git-crypt.process", escaped_git_crypt_path + " process");
 		git_config("filter.git-crypt.required", "true");
 		git_config("diff.git-crypt.textconv", escaped_git_crypt_path + " diff");
 	}
@@ -712,24 +715,9 @@ static int parse_plumbing_options (const char** key_name, const char** key_file,
 	return parse_options(options, argc, argv);
 }
 
-// Encrypt contents of stdin and write to stdout
-int clean (int argc, const char** argv)
+// Encrypt the contents of in and write them to out
+static int clean_stream (const Key_file& key_file, std::istream& in, std::ostream& out)
 {
-	const char*		key_name = 0;
-	const char*		key_path = 0;
-	const char*		legacy_key_path = 0;
-
-	int			argi = parse_plumbing_options(&key_name, &key_path, argc, argv);
-	if (argc - argi == 0) {
-	} else if (!key_name && !key_path && argc - argi == 1) { // Deprecated - for compatibility with pre-0.4
-		legacy_key_path = argv[argi];
-	} else {
-		std::clog << "Usage: git-crypt clean [--key-name=NAME] [--key-file=PATH]" << std::endl;
-		return 2;
-	}
-	Key_file		key_file;
-	load_key(key_file, key_name, key_path, legacy_key_path);
-
 	const Key_file::Entry*	key = key_file.get_latest();
 	if (!key) {
 		std::clog << "git-crypt: error: key file is empty" << std::endl;
@@ -746,10 +734,10 @@ int clean (int argc, const char** argv)
 
 	char			buffer[1024];
 
-	while (std::cin && file_size < Aes_ctr_encryptor::MAX_CRYPT_BYTES) {
-		std::cin.read(buffer, sizeof(buffer));
+	while (in && file_size < Aes_ctr_encryptor::MAX_CRYPT_BYTES) {
+		in.read(buffer, sizeof(buffer));
 
-		const size_t	bytes_read = std::cin.gcount();
+		const size_t	bytes_read = in.gcount();
 
 		hmac.add(reinterpret_cast<unsigned char*>(buffer), bytes_read);
 		file_size += bytes_read;
@@ -797,8 +785,8 @@ int clean (int argc, const char** argv)
 	hmac.get(digest);
 
 	// Write a header that...
-	std::cout.write("\0GITCRYPT\0", 10); // ...identifies this as an encrypted file
-	std::cout.write(reinterpret_cast<char*>(digest), Aes_ctr_encryptor::NONCE_LEN); // ...includes the nonce
+	out.write("\0GITCRYPT\0", 10); // ...identifies this as an encrypted file
+	out.write(reinterpret_cast<char*>(digest), Aes_ctr_encryptor::NONCE_LEN); // ...includes the nonce
 
 	// Now encrypt the file and write to stdout
 	Aes_ctr_encryptor	aes(key->aes_key, digest);
@@ -809,7 +797,7 @@ int clean (int argc, const char** argv)
 	while (file_data_len > 0) {
 		const size_t	buffer_len = std::min(sizeof(buffer), file_data_len);
 		aes.process(file_data, reinterpret_cast<unsigned char*>(buffer), buffer_len);
-		std::cout.write(buffer, buffer_len);
+		out.write(buffer, buffer_len);
 		file_data += buffer_len;
 		file_data_len -= buffer_len;
 	}
@@ -825,14 +813,35 @@ int clean (int argc, const char** argv)
 			aes.process(reinterpret_cast<unsigned char*>(buffer),
 			            reinterpret_cast<unsigned char*>(buffer),
 			            buffer_len);
-			std::cout.write(buffer, buffer_len);
+			out.write(buffer, buffer_len);
 		}
 	}
 
 	return 0;
 }
 
-static int decrypt_file_to_stdout (const Key_file& key_file, const unsigned char* header, std::istream& in)
+// Encrypt contents of stdin and write to stdout
+int clean (int argc, const char** argv)
+{
+	const char*		key_name = 0;
+	const char*		key_path = 0;
+	const char*		legacy_key_path = 0;
+
+	int			argi = parse_plumbing_options(&key_name, &key_path, argc, argv);
+	if (argc - argi == 0) {
+	} else if (!key_name && !key_path && argc - argi == 1) { // Deprecated - for compatibility with pre-0.4
+		legacy_key_path = argv[argi];
+	} else {
+		std::clog << "Usage: git-crypt clean [--key-name=NAME] [--key-file=PATH]" << std::endl;
+		return 2;
+	}
+	Key_file		key_file;
+	load_key(key_file, key_name, key_path, legacy_key_path);
+
+	return clean_stream(key_file, std::cin, std::cout);
+}
+
+static int decrypt_stream (const Key_file& key_file, const unsigned char* header, std::istream& in, std::ostream& out)
 {
 	const unsigned char*	nonce = header + 10;
 	uint32_t		key_version = 0; // TODO: get the version from the file header
@@ -850,7 +859,7 @@ static int decrypt_file_to_stdout (const Key_file& key_file, const unsigned char
 		in.read(reinterpret_cast<char*>(buffer), sizeof(buffer));
 		aes.process(buffer, buffer, in.gcount());
 		hmac.add(buffer, in.gcount());
-		std::cout.write(reinterpret_cast<char*>(buffer), in.gcount());
+		out.write(reinterpret_cast<char*>(buffer), in.gcount());
 	}
 
 	unsigned char		digest[Hmac_sha1_state::LEN];
@@ -864,6 +873,28 @@ static int decrypt_file_to_stdout (const Key_file& key_file, const unsigned char
 	}
 
 	return 0;
+}
+
+// Decrypt the contents of in and write them to out
+static int smudge_stream (const Key_file& key_file, std::istream& in, std::ostream& out)
+{
+	// Read the header to get the nonce and make sure it's actually encrypted
+	unsigned char		header[10 + Aes_ctr_decryptor::NONCE_LEN];
+	in.read(reinterpret_cast<char*>(header), sizeof(header));
+	if (in.gcount() != sizeof(header) || std::memcmp(header, "\0GITCRYPT\0", 10) != 0) {
+		// File not encrypted - just copy it out to stdout
+		std::clog << "git-crypt: Warning: file not encrypted" << std::endl;
+		std::clog << "git-crypt: Run 'git-crypt status' to make sure all files are properly encrypted." << std::endl;
+		std::clog << "git-crypt: If 'git-crypt status' reports no problems, then an older version of" << std::endl;
+		std::clog << "git-crypt: this file may be unencrypted in the repository's history.  If this" << std::endl;
+		std::clog << "git-crypt: file contains sensitive information, you can use 'git filter-branch'" << std::endl;
+		std::clog << "git-crypt: to remove its old versions from the history." << std::endl;
+		out.write(reinterpret_cast<char*>(header), in.gcount()); // include the bytes which we already read
+		out << in.rdbuf();
+		return 0;
+	}
+
+	return decrypt_stream(key_file, header, in, out);
 }
 
 // Decrypt contents of stdin and write to stdout
@@ -884,23 +915,7 @@ int smudge (int argc, const char** argv)
 	Key_file		key_file;
 	load_key(key_file, key_name, key_path, legacy_key_path);
 
-	// Read the header to get the nonce and make sure it's actually encrypted
-	unsigned char		header[10 + Aes_ctr_decryptor::NONCE_LEN];
-	std::cin.read(reinterpret_cast<char*>(header), sizeof(header));
-	if (std::cin.gcount() != sizeof(header) || std::memcmp(header, "\0GITCRYPT\0", 10) != 0) {
-		// File not encrypted - just copy it out to stdout
-		std::clog << "git-crypt: Warning: file not encrypted" << std::endl;
-		std::clog << "git-crypt: Run 'git-crypt status' to make sure all files are properly encrypted." << std::endl;
-		std::clog << "git-crypt: If 'git-crypt status' reports no problems, then an older version of" << std::endl;
-		std::clog << "git-crypt: this file may be unencrypted in the repository's history.  If this" << std::endl;
-		std::clog << "git-crypt: file contains sensitive information, you can use 'git filter-branch'" << std::endl;
-		std::clog << "git-crypt: to remove its old versions from the history." << std::endl;
-		std::cout.write(reinterpret_cast<char*>(header), std::cin.gcount()); // include the bytes which we already read
-		std::cout << std::cin.rdbuf();
-		return 0;
-	}
-
-	return decrypt_file_to_stdout(key_file, header, std::cin);
+	return smudge_stream(key_file, std::cin, std::cout);
 }
 
 int diff (int argc, const char** argv)
@@ -942,7 +957,242 @@ int diff (int argc, const char** argv)
 	}
 
 	// Go ahead and decrypt it
-	return decrypt_file_to_stdout(key_file, header, in);
+	return decrypt_stream(key_file, header, in, std::cout);
+}
+
+enum {
+	// Maximum payload of a pkt-line packet (the 4 byte length header is extra)
+	PKT_LINE_MAX_PAYLOAD = 65516
+};
+
+enum Packet_result {
+	PACKET_OK,
+	PACKET_FLUSH,
+	PACKET_EOF,
+	PACKET_INVALID
+};
+
+static int hex_digit_value (char c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+// Read one pkt-line packet.  On PACKET_OK and PACKET_FLUSH, payload holds the
+// packet contents (empty for a flush packet).
+static Packet_result read_packet (std::istream& in, std::string& payload)
+{
+	char		header[4];
+	in.read(header, 4);
+	if (in.gcount() != 4) {
+		return (in.gcount() == 0 && in.eof()) ? PACKET_EOF : PACKET_INVALID;
+	}
+
+	unsigned int	length = 0;
+	for (int i = 0; i < 4; ++i) {
+		const int	digit = hex_digit_value(header[i]);
+		if (digit < 0) {
+			return PACKET_INVALID;
+		}
+		length = (length << 4) | digit;
+	}
+
+	if (length == 0) {
+		payload.clear();
+		return PACKET_FLUSH;
+	}
+	if (length < 4) {
+		return PACKET_INVALID;
+	}
+
+	payload.resize(length - 4);
+	if (!payload.empty()) {
+		in.read(&payload[0], payload.size());
+		if (in.gcount() != static_cast<std::streamsize>(payload.size())) {
+			return PACKET_INVALID;
+		}
+	}
+	return PACKET_OK;
+}
+
+static void write_packet (std::ostream& out, const std::string& payload)
+{
+	size_t		offset = 0;
+	while (offset < payload.size()) {
+		const size_t	length = std::min(payload.size() - offset, static_cast<size_t>(PKT_LINE_MAX_PAYLOAD));
+		char		header[5];
+		snprintf(header, sizeof(header), "%04x", static_cast<unsigned int>(length + 4));
+		out.write(header, 4);
+		out.write(payload.data() + offset, length);
+		offset += length;
+	}
+}
+
+static void write_packet_text (std::ostream& out, const char* text)
+{
+	write_packet(out, std::string(text) + "\n");
+}
+
+static void write_flush_packet (std::ostream& out)
+{
+	out.write("0000", 4);
+}
+
+static void strip_line_ending (std::string& line)
+{
+	while (!line.empty() && (line[line.size() - 1] == '\n' || line[line.size() - 1] == '\r')) {
+		line.resize(line.size() - 1);
+	}
+}
+
+// Perform the handshake expected of a long-running filter process by Git.
+static bool filter_handshake (std::istream& in, std::ostream& out)
+{
+	std::string	line;
+
+	if (read_packet(in, line) != PACKET_OK) {
+		return false;
+	}
+	strip_line_ending(line);
+	if (line != "git-filter-client") {
+		return false;
+	}
+
+	bool		version_supported = false;
+	for (;;) {
+		const Packet_result	result = read_packet(in, line);
+		if (result == PACKET_FLUSH) {
+			break;
+		}
+		if (result != PACKET_OK) {
+			return false;
+		}
+		strip_line_ending(line);
+		if (line == "version=2") {
+			version_supported = true;
+		}
+	}
+	if (!version_supported) {
+		return false;
+	}
+
+	write_packet_text(out, "git-filter-server");
+	write_packet_text(out, "version=2");
+	write_flush_packet(out);
+
+	bool		clean_supported = false;
+	bool		smudge_supported = false;
+	for (;;) {
+		const Packet_result	result = read_packet(in, line);
+		if (result == PACKET_FLUSH) {
+			break;
+		}
+		if (result != PACKET_OK) {
+			return false;
+		}
+		strip_line_ending(line);
+		if (line == "capability=clean") {
+			clean_supported = true;
+		} else if (line == "capability=smudge") {
+			smudge_supported = true;
+		}
+	}
+	if (!clean_supported || !smudge_supported) {
+		return false;
+	}
+
+	write_packet_text(out, "capability=clean");
+	write_packet_text(out, "capability=smudge");
+	write_flush_packet(out);
+	out.flush();
+
+	return true;
+}
+
+// Long-running filter process, as spoken by Git (see gitattributes(5))
+int process (int argc, const char** argv)
+{
+	const char*		key_name = 0;
+	const char*		key_path = 0;
+
+	int			argi = parse_plumbing_options(&key_name, &key_path, argc, argv);
+	if (argc - argi != 0) {
+		std::clog << "Usage: git-crypt process [--key-name=NAME] [--key-file=PATH]" << std::endl;
+		return 2;
+	}
+	Key_file		key_file;
+	load_key(key_file, key_name, key_path);
+
+	if (!filter_handshake(std::cin, std::cout)) {
+		std::clog << "git-crypt: error: filter protocol handshake failed" << std::endl;
+		return 1;
+	}
+
+	for (;;) {
+		std::string	command;
+
+		// Read the request header: a list of "key=value" lines ended by a flush packet
+		for (;;) {
+			std::string	line;
+			const Packet_result	result = read_packet(std::cin, line);
+			if (result == PACKET_FLUSH) {
+				break;
+			}
+			if (result != PACKET_OK) {
+				return 0; // EOF or a broken pipe: Git is done with us
+			}
+			strip_line_ending(line);
+			if (line.compare(0, 8, "command=") == 0) {
+				command = line.substr(8);
+			}
+		}
+
+		// Read the content: zero or more packets ended by a flush packet
+		std::string	content;
+		for (;;) {
+			std::string	packet;
+			const Packet_result	result = read_packet(std::cin, packet);
+			if (result == PACKET_FLUSH) {
+				break;
+			}
+			if (result != PACKET_OK) {
+				std::clog << "git-crypt: error: malformed filter protocol content" << std::endl;
+				return 1;
+			}
+			content += packet;
+		}
+
+		std::istringstream	in(content);
+		std::ostringstream	out;
+		int			status;
+		if (command == "clean") {
+			status = clean_stream(key_file, in, out);
+		} else if (command == "smudge") {
+			status = smudge_stream(key_file, in, out);
+		} else {
+			std::clog << "git-crypt: error: unexpected filter command '" << command << "'" << std::endl;
+			write_packet_text(std::cout, "status=abort");
+			write_flush_packet(std::cout);
+			std::cout.flush();
+			return 1;
+		}
+
+		write_packet_text(std::cout, "status=success");
+		write_flush_packet(std::cout);
+		const std::string	result(out.str());
+		write_packet(std::cout, result);
+		write_flush_packet(std::cout);
+		if (status == 0) {
+			// An empty status list leaves the "success" status in effect
+			write_flush_packet(std::cout);
+		} else {
+			write_packet_text(std::cout, "status=error");
+			write_flush_packet(std::cout);
+		}
+		std::cout.flush();
+	}
 }
 
 void help_init (std::ostream& out)
