@@ -51,12 +51,6 @@
 #include <exception>
 #include <vector>
 
-enum {
-	// # of arguments per git checkout call; must be large enough to be efficient but small
-	// enough to avoid operating system limits on argument length
-	GIT_CHECKOUT_BATCH_SIZE = 100
-};
-
 static std::string attribute_name (const char* key_name)
 {
 	if (key_name) {
@@ -192,39 +186,30 @@ static void deconfigure_git_filters (const char* key_name)
 	}
 }
 
-static bool git_checkout_batch (std::vector<std::string>::const_iterator paths_begin, std::vector<std::string>::const_iterator paths_end)
+// Rewrite the given working tree files from the index, applying the smudge
+// filter.  checkout-index --force writes every file even when its stat
+// information is unchanged, so the files do not have to be touched first.
+static bool git_checkout (const std::vector<std::string>& paths)
 {
-	if (paths_begin == paths_end) {
+	if (paths.empty()) {
 		return true;
 	}
 
+	std::string	input;
+	for (std::vector<std::string>::const_iterator path(paths.begin()); path != paths.end(); ++path) {
+		input.append(*path);
+		input.push_back('\0');
+	}
+
 	std::vector<std::string>	command;
-
 	command.push_back("git");
-	command.push_back("checkout");
-	command.push_back("--");
+	command.push_back("checkout-index");
+	command.push_back("--force");
+	command.push_back("--stdin");
+	command.push_back("-z");
+	command.push_back("-u");	// update the index stat cache so 'git status' stays clean
 
-	for (auto path(paths_begin); path != paths_end; ++path) {
-		command.push_back(*path);
-	}
-
-	if (!successful_exit(exec_command(command))) {
-		return false;
-	}
-
-	return true;
-}
-
-static bool git_checkout (const std::vector<std::string>& paths)
-{
-	auto paths_begin(paths.begin());
-	while (paths.end() - paths_begin >= GIT_CHECKOUT_BATCH_SIZE) {
-		if (!git_checkout_batch(paths_begin, paths_begin + GIT_CHECKOUT_BATCH_SIZE)) {
-			return false;
-		}
-		paths_begin += GIT_CHECKOUT_BATCH_SIZE;
-	}
-	return git_checkout_batch(paths_begin, paths.end());
+	return successful_exit(exec_command_with_input(command, input.data(), input.size()));
 }
 
 static bool same_key_name (const char* a, const char* b)
@@ -1342,12 +1327,8 @@ int unlock (int argc, const char** argv)
 	}
 
 	// 4. Check out the files that are currently encrypted.
-	// Git won't check out a file if its mtime hasn't changed, so touch every file first.
-	for (std::vector<std::string>::const_iterator file(encrypted_files.begin()); file != encrypted_files.end(); ++file) {
-		touch_file(*file);
-	}
 	if (!git_checkout(encrypted_files)) {
-		std::clog << "Error: 'git checkout' failed" << std::endl;
+		std::clog << "Error: 'git checkout-index' failed" << std::endl;
 		std::clog << "git-crypt has been set up but existing encrypted files have not been decrypted" << std::endl;
 		return 1;
 	}
@@ -1437,12 +1418,8 @@ int lock (int argc, const char** argv)
 	}
 
 	// 3. Check out the files that are currently decrypted but should be encrypted.
-	// Git won't check out a file if its mtime hasn't changed, so touch every file first.
-	for (std::vector<std::string>::const_iterator file(encrypted_files.begin()); file != encrypted_files.end(); ++file) {
-		touch_file(*file);
-	}
 	if (!git_checkout(encrypted_files)) {
-		std::clog << "Error: 'git checkout' failed" << std::endl;
+		std::clog << "Error: 'git checkout-index' failed" << std::endl;
 		std::clog << "git-crypt has been locked up but existing decrypted files have not been encrypted" << std::endl;
 		return 1;
 	}
