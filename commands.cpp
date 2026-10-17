@@ -1098,6 +1098,7 @@ static bool filter_handshake (std::istream& in, std::ostream& out)
 	write_packet_text(out, "git-filter-server");
 	write_packet_text(out, "version=2");
 	write_flush_packet(out);
+	out.flush();	// Git waits for this before sending capabilities
 
 	bool		clean_supported = false;
 	bool		smudge_supported = false;
