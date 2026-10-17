@@ -50,6 +50,21 @@
 #include <errno.h>
 #include <exception>
 #include <vector>
+#include <chrono>
+#include <cstdlib>
+
+static bool timing_enabled ()
+{
+	return std::getenv("GIT_CRYPT_TIMING") != 0;
+}
+
+static void report_timing (const char* what, const std::chrono::steady_clock::time_point& start)
+{
+	if (timing_enabled()) {
+		const std::chrono::duration<double>	elapsed(std::chrono::steady_clock::now() - start);
+		std::clog << "git-crypt: timing: " << what << ": " << elapsed.count() << " s" << std::endl;
+	}
+}
 
 static std::string attribute_name (const char* key_name)
 {
@@ -1103,6 +1118,9 @@ static bool filter_handshake (std::istream& in, std::ostream& out)
 // Long-running filter process, as spoken by Git (see gitattributes(5))
 int process (int argc, const char** argv)
 {
+	if (timing_enabled()) {
+		std::clog << "git-crypt: timing: filter process started" << std::endl;
+	}
 	const char*		key_name = 0;
 	const char*		key_path = 0;
 
@@ -1260,7 +1278,9 @@ int unlock (int argc, const char** argv)
 	// Running 'git status' also serves as a check that the Git repo is accessible.
 
 	std::stringstream	status_output;
+	const std::chrono::steady_clock::time_point	status_start = std::chrono::steady_clock::now();
 	get_git_status(status_output);
+	report_timing("git status", status_start);
 	if (status_output.peek() != -1) {
 		std::clog << "Error: Working directory not clean." << std::endl;
 		std::clog << "Please commit your changes or 'git stash' them before running 'git-crypt unlock'." << std::endl;
@@ -1268,6 +1288,7 @@ int unlock (int argc, const char** argv)
 	}
 
 	// 2. Load the key(s)
+	const std::chrono::steady_clock::time_point	key_start = std::chrono::steady_clock::now();
 	std::vector<Key_file>	key_files;
 	if (argc > 0) {
 		// Read from the symmetric key file(s)
@@ -1313,9 +1334,11 @@ int unlock (int argc, const char** argv)
 			return 1;
 		}
 	}
+	report_timing("load key", key_start);
 
 
 	// 3. Install the key(s) and configure the git filters
+	const std::chrono::steady_clock::time_point	list_start = std::chrono::steady_clock::now();
 	std::vector<std::string>	encrypted_files;
 	for (std::vector<Key_file>::iterator key_file(key_files.begin()); key_file != key_files.end(); ++key_file) {
 		std::string		internal_key_path(get_internal_key_path(key_file->get_key_name()));
@@ -1329,13 +1352,16 @@ int unlock (int argc, const char** argv)
 		configure_git_filters(key_file->get_key_name());
 		get_encrypted_files(encrypted_files, key_file->get_key_name());
 	}
+	report_timing("configure filters and list encrypted files", list_start);
 
 	// 4. Check out the files that are currently encrypted.
+	const std::chrono::steady_clock::time_point	checkout_start = std::chrono::steady_clock::now();
 	if (!git_checkout(encrypted_files)) {
 		std::clog << "Error: 'git checkout-index' failed" << std::endl;
 		std::clog << "git-crypt has been set up but existing encrypted files have not been decrypted" << std::endl;
 		return 1;
 	}
+	report_timing("checkout", checkout_start);
 
 	return 0;
 }
