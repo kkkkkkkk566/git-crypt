@@ -162,9 +162,12 @@ static void git_deconfig (const std::string& name)
 	}
 }
 
+static std::string get_internal_key_path (const char* key_name);
+
 static void configure_git_filters (const char* key_name)
 {
 	std::string	escaped_git_crypt_path(escape_shell_arg(our_exe_path()));
+	const std::string	key_path(get_internal_key_path(key_name));
 
 	if (key_name) {
 		// Note: key_name contains only shell-safe characters so it need not be escaped.
@@ -173,14 +176,14 @@ static void configure_git_filters (const char* key_name)
 		git_config(std::string("filter.git-crypt-") + key_name + ".clean",
 		           escaped_git_crypt_path + " clean --key-name=" + key_name);
 		git_config(std::string("filter.git-crypt-") + key_name + ".process",
-		           escaped_git_crypt_path + " process --key-name=" + key_name);
+		           escaped_git_crypt_path + " process --key-file=" + escape_shell_arg(key_path) + " --key-name=" + key_name);
 		git_config(std::string("filter.git-crypt-") + key_name + ".required", "true");
 		git_config(std::string("diff.git-crypt-") + key_name + ".textconv",
 		           escaped_git_crypt_path + " diff --key-name=" + key_name);
 	} else {
 		git_config("filter.git-crypt.smudge", escaped_git_crypt_path + " smudge");
 		git_config("filter.git-crypt.clean", escaped_git_crypt_path + " clean");
-		git_config("filter.git-crypt.process", escaped_git_crypt_path + " process");
+		git_config("filter.git-crypt.process", escaped_git_crypt_path + " process --key-file=" + escape_shell_arg(key_path));
 		git_config("filter.git-crypt.required", "true");
 		git_config("diff.git-crypt.textconv", escaped_git_crypt_path + " diff");
 	}
@@ -260,6 +263,16 @@ static std::string get_internal_state_path ()
 
 	std::string			path;
 	std::getline(output, path);
+
+	// The filter command stores this path, so make it absolute: the filter
+	// may run from a different working directory.
+	if (!path.empty() && path[0] != '/' && !(path.size() >= 2 && path[1] == ':')) {
+		char			cwd[4096];
+		if (getcwd(cwd, sizeof(cwd))) {
+			path = std::string(cwd) + "/" + path;
+		}
+	}
+
 	path += "/git-crypt";
 
 	return path;
