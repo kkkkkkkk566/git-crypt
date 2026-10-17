@@ -187,12 +187,16 @@ static void deconfigure_git_filters (const char* key_name)
 }
 
 // Rewrite the given working tree files from the index, applying the smudge
-// filter.  checkout-index --force writes every file even when its stat
-// information is unchanged, so the files do not have to be touched first.
+// filter.  checkout-index skips files whose stat matches the index even with
+// --force, so touch them first to make sure they are actually written.
 static bool git_checkout (const std::vector<std::string>& paths)
 {
 	if (paths.empty()) {
 		return true;
+	}
+
+	for (std::vector<std::string>::const_iterator path(paths.begin()); path != paths.end(); ++path) {
+		touch_file(*path);
 	}
 
 	std::string	input;
